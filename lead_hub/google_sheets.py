@@ -11,6 +11,7 @@ from lead_hub.models import SheetData
 
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+RESULT_COLUMN_FALLBACK_INDEX = 10  # K
 
 
 def normalize_header(value: str) -> str:
@@ -20,6 +21,11 @@ def normalize_header(value: str) -> str:
 def find_header(headers: list[str], name: str) -> int | None:
     wanted = normalize_header(name)
     return next((index for index, header in enumerate(headers) if normalize_header(header) == wanted), None)
+
+
+def find_result_column(headers: list[str], name: str) -> int:
+    found = find_header(headers, name)
+    return found if found is not None else RESULT_COLUMN_FALLBACK_INDEX
 
 
 def row_value(row: list[str], index: int | None) -> str:
@@ -64,18 +70,7 @@ class GoogleSheetsGateway:
         values = result.get("values") or []
         headers = [str(value) for value in (values[0] if values else [])]
         rows = [[str(value) for value in row] for row in values[1:]] if values else []
-        result_index = find_header(headers, self.config.result_header)
-        if result_index is None:
-            result_index = len(headers)
-            if create_result_column:
-                cell = f"{column_to_a1(result_index)}1"
-                service.spreadsheets().values().update(
-                    spreadsheetId=self.config.spreadsheet_id,
-                    range=f"{quote_sheet_name(self.config.sheet_name)}!{cell}",
-                    valueInputOption="RAW",
-                    body={"values": [[self.config.result_header]]},
-                ).execute()
-            headers.append(self.config.result_header)
+        result_index = find_result_column(headers, self.config.result_header)
         return SheetData(self.config.spreadsheet_id, self.config.sheet_name, headers, rows, result_index)
 
     def write_result(self, sheet: SheetData, row_number: int, value: str) -> None:
