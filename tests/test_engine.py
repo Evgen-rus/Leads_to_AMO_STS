@@ -11,12 +11,12 @@ from lead_hub.storage import Storage
 
 
 class FakeSheets:
-    def __init__(self, fail_writes: int = 0):
+    def __init__(self, fail_writes: int = 0, rows=None):
         self.data = SheetData(
             "sheet",
             "Лист",
             ["ID", "Номера", "Канал", "Источник", "Ссылка_AmoCRM"],
-            [
+            rows or [
                 ["1", "+70000000001", "Сайт", "Источник A", ""],
                 ["2", "+70000000002", "", "B", "готово"],
             ],
@@ -39,13 +39,20 @@ class FakeSheets:
 class FakeAmo:
     def __init__(self):
         self.created = 0
+        self.batches: list[list[str]] = []
 
     def find(self, lead):
         return None
 
-    def create(self, lead):
-        self.created += 1
-        return CreatedLead("100", "200", "https://example.amocrm.ru/leads/detail/100")
+    def create_many(self, leads):
+        self.batches.append([lead.source_id for lead in leads])
+        self.created += len(leads)
+        return {
+            lead.source_id: CreatedLead(
+                lead.source_id, None, f"https://example.amocrm.ru/leads/detail/{lead.source_id}"
+            )
+            for lead in leads
+        }
 
 
 class EngineTest(unittest.TestCase):
@@ -64,7 +71,62 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(first.failed, 1)
         self.assertEqual(second.completed, 1)
         self.assertEqual(amo.created, 1)
-        self.assertEqual(sheets.writes, [(2, "https://example.amocrm.ru/leads/detail/100")])
+        self.assertEqual(sheets.writes, [(2, "https://example.amocrm.ru/leads/detail/1")])
+
+    def test_creates_leads_in_batches_of_40(self):
+        config = Config(
+            "sheet", "Лист", "credentials.json", "Ссылка_AmoCRM", Path("unused"),
+            "token", "amocrm.ru", "example", "ID", "Номера", "Канал", "Источник",
+        )
+        rows = [[str(i), f"+7000000{i:04d}", "", "Источник", ""] for i in range(1, 42)]
+        sheets = FakeSheets(rows=rows)
+        amo = FakeAmo()
+        with tempfile.TemporaryDirectory() as directory, Storage(Path(directory) / "leads.sqlite3") as storage:
+            stats = DeliveryEngine(config, storage, sheets, amo).run()
+        self.assertEqual(amo.batches, [[str(i) for i in range(1, 41)], ["41"]])
+        self.assertEqual(stats.created, 41)
+        self.assertEqual(stats.completed, 41)
+
+    def test_after_ambiguous_error_retries_only_confirmed_missing(self):
+        class AmbiguousAmo(FakeAmo):
+            def __init__(self):
+                super().__init__()
+                self.existing = {}
+
+            def find(self, lead):
+                return self.existing.get(lead.source_id)
+
+            def create_many(self, leads):
+                self.batches.append([lead.source_id for lead in leads])
+                if len(self.batches) == 1:
+                    lead = leads[0]
+                    self.existing[lead.source_id] = CreatedLead(
+                        lead.source_id, None, f"https://example.amocrm.ru/leads/detail/{lead.source_id}"
+                    )
+                    raise RuntimeError("Ответ потерян")
+                self.created += len(leads)
+                return {
+                    lead.source_id: CreatedLead(
+                        lead.source_id, None, f"https://example.amocrm.ru/leads/detail/{lead.source_id}"
+                    )
+                    for lead in leads
+                }
+
+        config = Config(
+            "sheet", "Лист", "credentials.json", "Ссылка_AmoCRM", Path("unused"),
+            "token", "amocrm.ru", "example", "ID", "Номера", "Канал", "Источник",
+        )
+        rows = [
+            ["1", "+70000000001", "", "Источник", ""],
+            ["2", "+70000000002", "", "Источник", ""],
+        ]
+        amo = AmbiguousAmo()
+        with tempfile.TemporaryDirectory() as directory, Storage(Path(directory) / "leads.sqlite3") as storage:
+            stats = DeliveryEngine(config, storage, FakeSheets(rows=rows), amo).run()
+        self.assertEqual(amo.batches, [["1", "2"], ["2"]])
+        self.assertEqual(stats.recovered, 1)
+        self.assertEqual(stats.created, 1)
+        self.assertEqual(stats.completed, 2)
 
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@ class FakeResponse:
         return None
 
     def json(self):
-        return [{"id": 100, "contact_id": 200}]
+        return [{"id": 100, "contact_id": 200, "request_id": "sts:42"}]
 
 
 class FakeSession:
@@ -52,6 +52,28 @@ class AmoGatewayTest(unittest.TestCase):
         )
         self.assertEqual(created.lead_id, "100")
         self.assertEqual(created.contact_id, "200")
+
+    def test_batch_results_are_matched_by_request_id(self):
+        config = Config(
+            "sheet", "Лист", "credentials.json", "Ссылка_AmoCRM", Path("unused"),
+            "token", "amocrm.ru", "example", "ID", "Номера", "Канал", "Источник",
+        )
+        session = FakeSession()
+        session.request = lambda *args, **kwargs: type("Response", (), {
+            "content": b"json",
+            "raise_for_status": lambda self: None,
+            "json": lambda self: [
+                {"id": 2, "request_id": "sts:2"},
+                {"id": 1, "request_id": "sts:1"},
+            ],
+        })()
+        leads = [
+            Lead("1", "Лист", 2, "+70000000001", "", "A"),
+            Lead("2", "Лист", 3, "+70000000002", "", "B"),
+        ]
+        created = AmoGateway(config, session).create_many(leads)
+        self.assertEqual(created["1"].lead_id, "1")
+        self.assertEqual(created["2"].lead_id, "2")
 
 
 if __name__ == "__main__":

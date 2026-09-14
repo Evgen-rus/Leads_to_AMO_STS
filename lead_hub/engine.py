@@ -8,6 +8,9 @@ from lead_hub.google_sheets import find_header, row_value
 from lead_hub.models import CreatedLead, Lead, SheetData
 from lead_hub.storage import Storage
 
+AMO_BATCH_SIZE = 40
+AMO_CREATE_ATTEMPTS = 3
+
 
 @dataclass
 class RunStats:
@@ -29,7 +32,7 @@ class Sheets(Protocol):
 
 class Amo(Protocol):
     def find(self, lead: Lead) -> CreatedLead | None: ...
-    def create(self, lead: Lead) -> CreatedLead: ...
+    def create_many(self, leads: list[Lead]) -> dict[str, CreatedLead]: ...
 
 
 class DeliveryEngine:
@@ -48,6 +51,60 @@ class DeliveryEngine:
             channel=row_value(row, indexes.get("channel")),
             source=row_value(row, indexes["source"]),
         )
+
+    def _complete(self, sheet: SheetData, lead: Lead, created: CreatedLead, stats: RunStats) -> None:
+        self.storage.mark_created(lead.source_id, created)
+        self.sheets.write_result(sheet, lead.sheet_row, created.url)
+        self.storage.mark_completed(lead.source_id)
+        stats.completed += 1
+
+    def _fail(self, lead: Lead, error: Exception | str, stats: RunStats) -> None:
+        current = self.storage.get(lead.source_id)
+        if current and current.amo_url:
+            self.storage.record_error(lead.source_id, str(error))
+        else:
+            self.storage.mark_failed(lead.source_id, str(error))
+        stats.failed += 1
+
+    def _create_batch(self, sheet: SheetData, batch: list[Lead], stats: RunStats) -> None:
+        pending = batch
+        last_error: Exception | str = "Не удалось создать сделки в amoCRM"
+        for attempt in range(AMO_CREATE_ATTEMPTS):
+            try:
+                created = self.amo.create_many(pending)
+            except Exception as error:
+                last_error = error
+                absent: list[Lead] = []
+                for lead in pending:
+                    try:
+                        recovered = self.amo.find(lead)
+                    except Exception as check_error:
+                        self._fail(lead, f"{error}; не удалось проверить создание: {check_error}", stats)
+                        continue
+                    if recovered is None:
+                        absent.append(lead)
+                    else:
+                        stats.recovered += 1
+                        try:
+                            self._complete(sheet, lead, recovered, stats)
+                        except Exception as write_error:
+                            self._fail(lead, write_error, stats)
+                pending = absent
+                if not pending:
+                    return
+                if attempt + 1 < AMO_CREATE_ATTEMPTS:
+                    continue
+                for lead in pending:
+                    self._fail(lead, last_error, stats)
+                return
+
+            stats.created += len(created)
+            for lead in pending:
+                try:
+                    self._complete(sheet, lead, created[lead.source_id], stats)
+                except Exception as error:
+                    self._fail(lead, error, stats)
+            return
 
     def run(self, *, dry_run: bool = False, limit: int | None = None) -> RunStats:
         stats = RunStats()
@@ -91,6 +148,7 @@ class DeliveryEngine:
         if dry_run:
             return stats
 
+        missing_in_amo: list[Lead] = []
         for imported in leads:
             lead = self.storage.get(imported.source_id)
             if lead is None:
@@ -105,21 +163,15 @@ class DeliveryEngine:
                 self.storage.mark_attempt(lead.source_id)
                 created = self.amo.find(lead)
                 if created is None:
-                    created = self.amo.create(lead)
-                    stats.created += 1
-                else:
-                    stats.recovered += 1
-                self.storage.mark_created(lead.source_id, created)
-                self.sheets.write_result(sheet, lead.sheet_row, created.url)
-                self.storage.mark_completed(lead.source_id)
-                stats.completed += 1
+                    missing_in_amo.append(lead)
+                    continue
+                stats.recovered += 1
+                self._complete(sheet, lead, created, stats)
             except Exception as error:
-                current = self.storage.get(lead.source_id)
-                if current and current.amo_url:
-                    self.storage.record_error(lead.source_id, str(error))
-                else:
-                    self.storage.mark_failed(lead.source_id, str(error))
-                stats.failed += 1
+                self._fail(lead, error, stats)
+
+        for start in range(0, len(missing_in_amo), AMO_BATCH_SIZE):
+            self._create_batch(sheet, missing_in_amo[start:start + AMO_BATCH_SIZE], stats)
         return stats
 
 

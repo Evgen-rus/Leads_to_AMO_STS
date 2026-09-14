@@ -47,8 +47,8 @@ class AmoGateway:
                 return CreatedLead(lead_id, None, self.lead_url(lead_id), recovered=True)
         return None
 
-    def create(self, lead: Lead) -> CreatedLead:
-        payload = {
+    def _payload(self, lead: Lead) -> dict[str, Any]:
+        return {
             "name": f"{lead.source} {lead.phone}".strip(),
             "pipeline_id": self.config.pipeline_id,
             "status_id": self.config.status_id,
@@ -70,10 +70,21 @@ class AmoGateway:
                 ]
             },
         }
-        result = self._request("POST", "leads/complex", json=[payload])
-        if not isinstance(result, list) or not result or not result[0].get("id"):
-            raise RuntimeError("amoCRM не вернула ID созданной сделки")
-        item = result[0]
-        lead_id = str(item["id"])
-        contact_id = str(item["contact_id"]) if item.get("contact_id") else None
-        return CreatedLead(lead_id, contact_id, self.lead_url(lead_id))
+
+    def create_many(self, leads: list[Lead]) -> dict[str, CreatedLead]:
+        result = self._request("POST", "leads/complex", json=[self._payload(lead) for lead in leads])
+        if not isinstance(result, list):
+            raise RuntimeError("amoCRM не вернула список созданных сделок")
+        by_request_id = {str(item.get("request_id")): item for item in result}
+        created: dict[str, CreatedLead] = {}
+        for lead in leads:
+            item = by_request_id.get(f"sts:{lead.source_id}")
+            if not item or not item.get("id"):
+                raise RuntimeError(f"amoCRM не вернула созданную сделку для ID {lead.source_id}")
+            lead_id = str(item["id"])
+            contact_id = str(item["contact_id"]) if item.get("contact_id") else None
+            created[lead.source_id] = CreatedLead(lead_id, contact_id, self.lead_url(lead_id))
+        return created
+
+    def create(self, lead: Lead) -> CreatedLead:
+        return self.create_many([lead])[lead.source_id]
