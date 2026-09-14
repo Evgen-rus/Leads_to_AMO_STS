@@ -6,6 +6,8 @@ credentials/
 # Logs
 logs/
 *.log
+data/
+*.sqlite3
 service_log.txt
 bot_process.log
 
