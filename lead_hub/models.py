@@ -26,6 +26,8 @@ class Lead:
     amo_url: str | None = None
     attempts: int = 0
     last_error: str | None = None
+    normalized_phone: str = ""
+    duplicate_of_source_id: str | None = None
 
 
 @dataclass(frozen=True)

@@ -31,7 +31,7 @@ def main() -> int:
         f"Просмотрено: {stats.scanned}; уже отмечено: {stats.skipped_marked}; "
         f"невалидно: {stats.skipped_invalid}; импортировано: {stats.imported}; "
         f"план: {stats.planned}; создано: {stats.created}; восстановлено: {stats.recovered}; "
-        f"завершено: {stats.completed}; ошибок: {stats.failed}"
+        f"дублей: {stats.duplicates}; завершено: {stats.completed}; ошибок: {stats.failed}"
     )
     return 1 if stats.failed else 0
 

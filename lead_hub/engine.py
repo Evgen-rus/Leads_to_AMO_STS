@@ -21,6 +21,7 @@ class RunStats:
     planned: int = 0
     created: int = 0
     recovered: int = 0
+    duplicates: int = 0
     completed: int = 0
     failed: int = 0
 
@@ -60,7 +61,7 @@ class DeliveryEngine:
 
     def _fail(self, lead: Lead, error: Exception | str, stats: RunStats) -> None:
         current = self.storage.get(lead.source_id)
-        if current and current.amo_url:
+        if current and (current.amo_url or current.state == "duplicate"):
             self.storage.record_error(lead.source_id, str(error))
         else:
             self.storage.mark_failed(lead.source_id, str(error))
@@ -135,15 +136,28 @@ class DeliveryEngine:
             if lead.source_id in seen_source_ids:
                 stats.skipped_invalid += 1
                 continue
-            if limit is not None and len(leads) >= limit:
+            selected = stats.planned if dry_run else stats.imported
+            if limit is not None and selected >= limit:
                 break
             seen_source_ids.add(lead.source_id)
-            leads.append(lead)
             if dry_run:
+                leads.append(lead)
                 stats.planned += 1
             else:
-                self.storage.upsert(lead)
+                saved = self.storage.upsert(lead)
                 stats.imported += 1
+                owner = self.storage.phone_owner(saved.normalized_phone)
+                if owner and owner.source_id != saved.source_id:
+                    self.storage.mark_duplicate(saved.source_id, owner.source_id)
+                    stats.duplicates += 1
+                    try:
+                        self.sheets.write_result(
+                            sheet, saved.sheet_row, f"Дубль — ID {owner.source_id}"
+                        )
+                    except Exception as error:
+                        self._fail(saved, error, stats)
+                    continue
+                leads.append(saved)
 
         if dry_run:
             return stats
