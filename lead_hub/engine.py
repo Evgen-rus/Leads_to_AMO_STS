@@ -9,7 +9,7 @@ from lead_hub.models import CreatedLead, Lead, SheetData
 from lead_hub.storage import Storage
 
 AMO_BATCH_SIZE = 40
-AMO_CREATE_ATTEMPTS = 3
+AMO_CREATE_ATTEMPTS = 1
 
 
 @dataclass

@@ -89,7 +89,7 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(stats.created, 41)
         self.assertEqual(stats.completed, 41)
 
-    def test_after_ambiguous_error_retries_only_confirmed_missing(self):
+    def test_after_ambiguous_error_does_not_repeat_post(self):
         class AmbiguousAmo(FakeAmo):
             def __init__(self):
                 super().__init__()
@@ -125,10 +125,11 @@ class EngineTest(unittest.TestCase):
         amo = AmbiguousAmo()
         with tempfile.TemporaryDirectory() as directory, Storage(Path(directory) / "leads.sqlite3") as storage:
             stats = DeliveryEngine(config, storage, FakeSheets(rows=rows), amo).run()
-        self.assertEqual(amo.batches, [["1", "2"], ["2"]])
+        self.assertEqual(amo.batches, [["1", "2"]])
         self.assertEqual(stats.recovered, 1)
-        self.assertEqual(stats.created, 1)
-        self.assertEqual(stats.completed, 2)
+        self.assertEqual(stats.created, 0)
+        self.assertEqual(stats.completed, 1)
+        self.assertEqual(stats.failed, 1)
 
     def test_duplicate_from_previous_run_never_calls_amo(self):
         config = Config(

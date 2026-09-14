@@ -104,6 +104,21 @@ class Storage:
         ).fetchone()
         return self._lead(row)
 
+    def unfinished(self) -> list[Lead]:
+        rows = self.connection.execute(
+            """SELECT source_id, sheet_name, sheet_row, phone, channel, source, state,
+                      amo_lead_id, amo_contact_id, amo_url, attempts, last_error,
+                      normalized_phone, duplicate_of_source_id
+               FROM leads WHERE state NOT IN ('completed', 'duplicate') ORDER BY sheet_row"""
+        ).fetchall()
+        return [lead for row in rows if (lead := self._lead(row)) is not None]
+
+    def earliest_unfinished_created_at(self) -> str | None:
+        row = self.connection.execute(
+            "SELECT MIN(created_at) FROM leads WHERE state NOT IN ('completed', 'duplicate')"
+        ).fetchone()
+        return str(row[0]) if row and row[0] else None
+
     def upsert(self, lead: Lead) -> Lead:
         self.connection.execute(
             """

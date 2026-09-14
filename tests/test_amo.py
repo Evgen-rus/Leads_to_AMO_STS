@@ -17,7 +17,7 @@ class FakeResponse:
     def __init__(self, status_code=200, headers=None, result=None):
         self.status_code = status_code
         self.headers = headers or {}
-        self.result = result or [{"id": 100, "contact_id": 200, "request_id": "sts:42"}]
+        self.result = result or [{"id": 100, "contact_id": 200, "request_id": ["sts:42"]}]
 
     def raise_for_status(self):
         if self.status_code >= 400:
@@ -71,8 +71,8 @@ class AmoGatewayTest(unittest.TestCase):
         session = FakeSession()
         session.request = lambda *args, **kwargs: FakeResponse(
             result=[
-                {"id": 2, "request_id": "sts:2"},
-                {"id": 1, "request_id": "sts:1"},
+                {"id": 2, "request_id": ["sts:2"]},
+                {"id": 1, "request_id": ["sts:1"]},
             ]
         )
         leads = [
@@ -82,6 +82,48 @@ class AmoGatewayTest(unittest.TestCase):
         created = AmoGateway(config, session).create_many(leads)
         self.assertEqual(created["1"].lead_id, "1")
         self.assertEqual(created["2"].lead_id, "2")
+
+    def test_find_accepts_amo_whitespace_normalization(self):
+        config = Config(
+            "sheet", "Лист", "credentials.json", "Ссылка_AmoCRM", Path("unused"),
+            "token", "amocrm.ru", "example", "ID", "Номера", "Канал", "Источник",
+        )
+        lead = Lead("42", "Лист", 2, "+70000000000", "Сайт", "Источник A")
+        result = {
+            "_embedded": {
+                "leads": [
+                    {
+                        "id": 100,
+                        "custom_fields_values": [
+                            {
+                                "field_id": 1461977,
+                                "values": [{"value": "ID: 42 Канал: Сайт Источник: Источник A"}],
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+        found = AmoGateway(config, FakeSession([FakeResponse(result=result)])).find(lead)
+        self.assertEqual(found.lead_id, "100")
+
+    def test_find_refuses_ambiguous_duplicates(self):
+        config = Config(
+            "sheet", "Лист", "credentials.json", "Ссылка_AmoCRM", Path("unused"),
+            "token", "amocrm.ru", "example", "ID", "Номера", "Канал", "Источник",
+        )
+        lead = Lead("42", "Лист", 2, "+70000000000", "Сайт", "Источник A")
+        item = {
+            "custom_fields_values": [
+                {
+                    "field_id": 1461977,
+                    "values": [{"value": "ID: 42 Канал: Сайт Источник: Источник A"}],
+                }
+            ]
+        }
+        result = {"_embedded": {"leads": [{"id": 100, **item}, {"id": 101, **item}]}}
+        with self.assertRaisesRegex(RuntimeError, "несколько сделок"):
+            AmoGateway(config, FakeSession([FakeResponse(result=result)])).find(lead)
 
     def test_limits_all_requests_to_five_per_second(self):
         config = Config(

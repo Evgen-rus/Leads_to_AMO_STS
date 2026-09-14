@@ -32,6 +32,10 @@ class AmoGateway:
     def comment(lead: Lead) -> str:
         return f"ID: {lead.source_id}\nКанал: {lead.channel}\nИсточник: {lead.source}"
 
+    @staticmethod
+    def normalize_comment(value: str) -> str:
+        return " ".join(str(value or "").split())
+
     def lead_url(self, lead_id: str) -> str:
         return f"https://{self.config.amo_api_domain}.{self.config.amo_base_domain}/leads/detail/{lead_id}"
 
@@ -95,18 +99,47 @@ class AmoGateway:
             return response.json() if response.content else {}
         raise RuntimeError("Исчерпаны попытки запроса к amoCRM")
 
-    def find(self, lead: Lead) -> CreatedLead | None:
-        result = self._request("GET", "leads", params={"query": f"ID: {lead.source_id}", "limit": 250})
+    def find_all(self, lead: Lead) -> list[CreatedLead]:
+        result = self._request("GET", "leads", params={"query": lead.source_id, "limit": 250})
+        matches: list[CreatedLead] = []
         for item in (result.get("_embedded", {}).get("leads", []) if isinstance(result, dict) else []):
             fields = item.get("custom_fields_values") or []
             values = next(
                 (field.get("values") or [] for field in fields if field.get("field_id") == self.config.comment_field_id),
                 [],
             )
-            if any(str(value.get("value") or "") == self.comment(lead) for value in values):
+            expected = self.normalize_comment(self.comment(lead))
+            if any(self.normalize_comment(value.get("value")) == expected for value in values):
                 lead_id = str(item["id"])
-                return CreatedLead(lead_id, None, self.lead_url(lead_id), recovered=True)
-        return None
+                matches.append(CreatedLead(lead_id, None, self.lead_url(lead_id), recovered=True))
+        return matches
+
+    def find(self, lead: Lead) -> CreatedLead | None:
+        matches = self.find_all(lead)
+        if len(matches) > 1:
+            raise RuntimeError(
+                f"В amoCRM найдено несколько сделок для исходного ID {lead.source_id}"
+            )
+        return matches[0] if matches else None
+
+    def list_created_since(self, created_from: int) -> list[dict[str, Any]]:
+        leads: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            result = self._request(
+                "GET",
+                "leads",
+                params={
+                    "filter[created_at][from]": created_from,
+                    "limit": 250,
+                    "page": page,
+                },
+            )
+            rows = result.get("_embedded", {}).get("leads", []) if isinstance(result, dict) else []
+            leads.extend(rows)
+            if len(rows) < 250:
+                return leads
+            page += 1
 
     def _payload(self, lead: Lead) -> dict[str, Any]:
         return {
@@ -136,7 +169,13 @@ class AmoGateway:
         result = self._request("POST", "leads/complex", json=[self._payload(lead) for lead in leads])
         if not isinstance(result, list):
             raise RuntimeError("amoCRM не вернула список созданных сделок")
-        by_request_id = {str(item.get("request_id")): item for item in result}
+        by_request_id: dict[str, dict[str, Any]] = {}
+        for item in result:
+            request_ids = item.get("request_id")
+            if not isinstance(request_ids, list):
+                request_ids = [request_ids]
+            for request_id in request_ids:
+                by_request_id[str(request_id)] = item
         created: dict[str, CreatedLead] = {}
         for lead in leads:
             item = by_request_id.get(f"sts:{lead.source_id}")
