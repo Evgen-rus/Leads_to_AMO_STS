@@ -21,7 +21,8 @@ class TransferToAiTest(unittest.TestCase):
                 normalize_header(value)
                 for value in ("Недозвон", "Автоответчик / помощник", "Сброс / молчит", "Не удалось связаться 9 раз")
             ),
-            source_transferred_status="Передали AI — статус не менять",
+            source_transferred_status="Недозвон 4 суток — передали AI",
+            source_not_called_transferred_status="Не звонили 3 суток — передали AI",
             destination_not_called_status="Передали AI — менеджеры не звонили",
             destination_no_answer_status="Передали AI — недозвон",
             headers={
@@ -53,6 +54,8 @@ class TransferToAiTest(unittest.TestCase):
         self.assertEqual(plan.already_in_destination, 1)
         self.assertEqual(plan.transfers[0].values[-1], "Передали AI — менеджеры не звонили")
         self.assertEqual(plan.transfers[1].values[-1], "Передали AI — недозвон")
+        self.assertEqual(plan.transfers[0].source_status, "Не звонили 3 суток — передали AI")
+        self.assertEqual(plan.transfers[1].source_status, "Недозвон 4 суток — передали AI")
 
 
 if __name__ == "__main__":

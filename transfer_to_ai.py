@@ -29,6 +29,7 @@ class TransferConfig:
     no_answer_workdays: int
     no_answer_statuses: frozenset[str]
     source_transferred_status: str
+    source_not_called_transferred_status: str
     destination_not_called_status: str
     destination_no_answer_status: str
     headers: dict[str, str]
@@ -79,7 +80,10 @@ class TransferConfig:
             no_answer_workdays=positive_int("NO_ANSWER_WORKDAYS", "4"),
             no_answer_statuses=statuses,
             source_transferred_status=os.getenv(
-                "SOURCE_TRANSFERRED_STATUS", "Передали AI — статус не менять"
+                "SOURCE_TRANSFERRED_STATUS", "Недозвон 4 суток — передали AI"
+            ).strip(),
+            source_not_called_transferred_status=os.getenv(
+                "SOURCE_NOT_CALLED_TRANSFERRED_STATUS", "Не звонили 3 суток — передали AI"
             ).strip(),
             destination_not_called_status=os.getenv(
                 "DEST_NOT_CALLED_STATUS", "Передали AI — менеджеры не звонили"
@@ -105,6 +109,7 @@ class Transfer:
     source_row: int
     source_id: str
     values: list[str]
+    source_status: str
     already_in_destination: bool
 
 
@@ -188,12 +193,14 @@ def build_plan(
                 plan.too_recent += 1
                 continue
             destination_status = config.destination_not_called_status
+            source_status = config.source_not_called_transferred_status
             plan.not_called += 1
         elif normalized_status in config.no_answer_statuses:
             if event_date > no_answer_cutoff:
                 plan.too_recent += 1
                 continue
             destination_status = config.destination_no_answer_status
+            source_status = config.source_transferred_status
             plan.no_answer += 1
         else:
             plan.other_status += 1
@@ -214,6 +221,7 @@ def build_plan(
                     row_value(row, resolved["source"]),
                     destination_status,
                 ],
+                source_status=source_status,
                 already_in_destination=already,
             )
         )
@@ -269,7 +277,7 @@ def apply_plan(service, config: TransferConfig, plan: Plan) -> None:
     updates = [
         {
             "range": f"{quote_sheet_name(config.source_sheet)}!{status_column}{item.source_row}",
-            "values": [[config.source_transferred_status]],
+            "values": [[item.source_status]],
         }
         for item in plan.transfers
     ]
