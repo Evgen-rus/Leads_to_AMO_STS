@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import random
+import threading
+import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import requests
@@ -7,11 +12,18 @@ import requests
 from lead_hub.config import Config
 from lead_hub.models import CreatedLead, Lead
 
+AMO_REQUESTS_PER_SECOND = 5.0
+AMO_MIN_REQUEST_INTERVAL = 1 / AMO_REQUESTS_PER_SECOND
+AMO_RETRY_MAX_ATTEMPTS = 4
+AMO_RETRYABLE_GET_STATUSES = {429, 502, 503, 504}
+
 
 class AmoGateway:
     def __init__(self, config: Config, session: requests.Session | None = None):
         self.config = config
         self.session = session or requests.Session()
+        self._last_request_at: float | None = None
+        self._rate_lock = threading.Lock()
 
     def _url(self, path: str) -> str:
         return f"https://{self.config.amo_api_domain}.{self.config.amo_base_domain}/api/v4/{path}"
@@ -23,16 +35,65 @@ class AmoGateway:
     def lead_url(self, lead_id: str) -> str:
         return f"https://{self.config.amo_api_domain}.{self.config.amo_base_domain}/leads/detail/{lead_id}"
 
+    def _wait_for_rate_limit(self) -> None:
+        with self._rate_lock:
+            now = time.monotonic()
+            if self._last_request_at is not None:
+                delay = AMO_MIN_REQUEST_INTERVAL - (now - self._last_request_at)
+                if delay > 0:
+                    time.sleep(delay)
+                    now = time.monotonic()
+            self._last_request_at = now
+
+    @staticmethod
+    def _retry_after(response: requests.Response) -> float | None:
+        value = response.headers.get("Retry-After")
+        if not value:
+            return None
+        try:
+            return max(0.0, float(value))
+        except ValueError:
+            try:
+                retry_at = parsedate_to_datetime(value)
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=timezone.utc)
+                return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+            except (TypeError, ValueError, OverflowError):
+                return None
+
+    @staticmethod
+    def _backoff(attempt: int) -> float:
+        return 2 ** attempt + random.uniform(0, 0.25)
+
     def _request(self, method: str, path: str, **kwargs: Any) -> Any:
-        response = self.session.request(
-            method,
-            self._url(path),
-            headers={"Authorization": f"Bearer {self.config.amo_token}"},
-            timeout=30,
-            **kwargs,
-        )
-        response.raise_for_status()
-        return response.json() if response.content else {}
+        method = method.upper()
+        for attempt in range(AMO_RETRY_MAX_ATTEMPTS):
+            self._wait_for_rate_limit()
+            try:
+                response = self.session.request(
+                    method,
+                    self._url(path),
+                    headers={"Authorization": f"Bearer {self.config.amo_token}"},
+                    timeout=30,
+                    **kwargs,
+                )
+            except requests.RequestException:
+                if method != "GET" or attempt + 1 >= AMO_RETRY_MAX_ATTEMPTS:
+                    raise
+                time.sleep(self._backoff(attempt))
+                continue
+
+            retryable = response.status_code == 429 or (
+                method == "GET" and response.status_code in AMO_RETRYABLE_GET_STATUSES
+            )
+            if retryable and attempt + 1 < AMO_RETRY_MAX_ATTEMPTS:
+                delay = self._retry_after(response) if response.status_code == 429 else None
+                time.sleep(delay if delay is not None else self._backoff(attempt))
+                continue
+
+            response.raise_for_status()
+            return response.json() if response.content else {}
+        raise RuntimeError("Исчерпаны попытки запроса к amoCRM")
 
     def find(self, lead: Lead) -> CreatedLead | None:
         result = self._request("GET", "leads", params={"query": f"ID: {lead.source_id}", "limit": 250})
