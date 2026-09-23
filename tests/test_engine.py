@@ -35,6 +35,9 @@ class FakeSheets:
         self.writes.append((row_number, value))
         self.data.rows[row_number - 2][self.data.result_column_index] = value
 
+    def flush(self):
+        return None
+
 
 class FakeAmo:
     def __init__(self):
@@ -73,7 +76,7 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(first.failed, 1)
         self.assertEqual(second.completed, 1)
         self.assertEqual(amo.created, 1)
-        self.assertEqual(sheets.writes, [(2, "https://example.amocrm.ru/leads/detail/1")])
+        self.assertEqual(sheets.writes, [(2, "дубль в bd https://example.amocrm.ru/leads/detail/1")])
 
     def test_creates_leads_in_batches_of_40(self):
         config = Config(
@@ -178,6 +181,41 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(stats.duplicates, 2)
         self.assertIn((3, "Дубль — ID 100"), sheets.writes)
         self.assertIn((4, "Дубль — ID 100"), sheets.writes)
+
+    def test_existing_sqlite_link_is_marked_in_the_same_cell(self):
+        config = Config(
+            "sheet", "Лист", "credentials.json", "Ссылка_AmoCRM", Path("unused"),
+            "token", "amocrm.ru", "example", "ID", "Номера", "Канал", "Источник",
+        )
+        sheets = FakeSheets(rows=[["1", "+70000000001", "Сайт", "Источник A", ""]])
+        amo = FakeAmo()
+        with tempfile.TemporaryDirectory() as directory, Storage(Path(directory) / "leads.sqlite3") as storage:
+            storage.upsert(Lead("1", "Лист", 2, "+70000000001", "Сайт", "Источник A"))
+            storage.mark_created("1", CreatedLead("amo-1", None, "https://example.amocrm.ru/leads/detail/amo-1"))
+            stats = DeliveryEngine(config, storage, sheets, amo).run()
+        self.assertEqual(amo.find_calls, [])
+        self.assertEqual(amo.batches, [])
+        self.assertEqual(stats.completed, 1)
+        self.assertEqual(sheets.writes, [(2, "дубль в bd https://example.amocrm.ru/leads/detail/amo-1")])
+
+    def test_existing_amo_lead_is_marked_in_the_same_cell(self):
+        class ExistingAmo(FakeAmo):
+            def find(self, lead):
+                self.find_calls.append(lead.source_id)
+                return CreatedLead(lead.source_id, None, f"https://example.amocrm.ru/leads/detail/{lead.source_id}", recovered=True)
+
+        config = Config(
+            "sheet", "Лист", "credentials.json", "Ссылка_AmoCRM", Path("unused"),
+            "token", "amocrm.ru", "example", "ID", "Номера", "Канал", "Источник",
+        )
+        sheets = FakeSheets(rows=[["1", "+70000000001", "Сайт", "Источник A", ""]])
+        amo = ExistingAmo()
+        with tempfile.TemporaryDirectory() as directory, Storage(Path(directory) / "leads.sqlite3") as storage:
+            stats = DeliveryEngine(config, storage, sheets, amo).run()
+        self.assertEqual(amo.batches, [])
+        self.assertEqual(stats.recovered, 1)
+        self.assertEqual(stats.created, 0)
+        self.assertEqual(sheets.writes, [(2, "дубль в ama https://example.amocrm.ru/leads/detail/1")])
 
 
 if __name__ == "__main__":

@@ -12,6 +12,14 @@ AMO_BATCH_SIZE = 40
 AMO_CREATE_ATTEMPTS = 1
 
 
+def result_cell(url: str, source: str | None = None) -> str:
+    if source == "bd":
+        return f"дубль в bd {url}"
+    if source == "ama":
+        return f"дубль в ama {url}"
+    return url
+
+
 @dataclass
 class RunStats:
     scanned: int = 0
@@ -29,6 +37,7 @@ class RunStats:
 class Sheets(Protocol):
     def read(self, *, create_result_column: bool) -> SheetData: ...
     def write_result(self, sheet: SheetData, row_number: int, value: str) -> None: ...
+    def flush(self) -> None: ...
 
 
 class Amo(Protocol):
@@ -37,11 +46,15 @@ class Amo(Protocol):
 
 
 class DeliveryEngine:
-    def __init__(self, config: Config, storage: Storage, sheets: Sheets, amo: Amo):
+    def __init__(self, config: Config, storage: Storage, sheets: Sheets, amo: Amo, *, debug: bool = False):
         self.config = config
         self.storage = storage
         self.sheets = sheets
         self.amo = amo
+        self.debug = debug
+
+    def _log(self, message: str) -> None:
+        print(message, flush=True)
 
     def _lead(self, sheet: SheetData, row: list[str], row_number: int, indexes: dict[str, int]) -> Lead:
         return Lead(
@@ -53,9 +66,11 @@ class DeliveryEngine:
             source=row_value(row, indexes["source"]),
         )
 
-    def _complete(self, sheet: SheetData, lead: Lead, created: CreatedLead, stats: RunStats) -> None:
+    def _complete(
+        self, sheet: SheetData, lead: Lead, created: CreatedLead, stats: RunStats, *, source: str | None = None
+    ) -> None:
         self.storage.mark_created(lead.source_id, created)
-        self.sheets.write_result(sheet, lead.sheet_row, created.url)
+        self.sheets.write_result(sheet, lead.sheet_row, result_cell(created.url, source))
         self.storage.mark_completed(lead.source_id)
         stats.completed += 1
 
@@ -87,7 +102,7 @@ class DeliveryEngine:
                     else:
                         stats.recovered += 1
                         try:
-                            self._complete(sheet, lead, recovered, stats)
+                            self._complete(sheet, lead, recovered, stats, source="ama")
                         except Exception as write_error:
                             self._fail(lead, write_error, stats)
                 pending = absent
@@ -108,6 +123,12 @@ class DeliveryEngine:
             return
 
     def run(self, *, dry_run: bool = False, limit: int | None = None) -> RunStats:
+        try:
+            return self._run_once(dry_run=dry_run, limit=limit)
+        finally:
+            self.sheets.flush()
+
+    def _run_once(self, *, dry_run: bool = False, limit: int | None = None) -> RunStats:
         stats = RunStats()
         sheet = self.sheets.read(create_result_column=not dry_run)
         names = {
@@ -141,6 +162,10 @@ class DeliveryEngine:
                 break
             seen_source_ids.add(lead.source_id)
             if dry_run:
+                self._log(
+                    f"В работу: строка {lead.sheet_row}, ID {lead.source_id}, "
+                    f"телефон {lead.phone}, канал {lead.channel}, источник {lead.source}"
+                )
                 leads.append(lead)
                 stats.planned += 1
             else:
@@ -148,6 +173,10 @@ class DeliveryEngine:
                 stats.imported += 1
                 owner = self.storage.phone_owner(saved.normalized_phone)
                 if owner and owner.source_id != saved.source_id:
+                    self._log(
+                        f"Строка {saved.sheet_row}, ID {saved.source_id}: дубль телефона, "
+                        f"владелец {owner.source_id}. В amoCRM не отправляем."
+                    )
                     self.storage.mark_duplicate(saved.source_id, owner.source_id)
                     stats.duplicates += 1
                     try:
@@ -157,8 +186,16 @@ class DeliveryEngine:
                     except Exception as error:
                         self._fail(saved, error, stats)
                     continue
+                self._log(
+                    f"В работу: строка {saved.sheet_row}, ID {saved.source_id}, "
+                    f"телефон {saved.phone}, канал {saved.channel}, источник {saved.source}"
+                )
                 leads.append(saved)
 
+        self._log(
+            f"Проверка листа закончена. К отправке: {len(leads)}. "
+            f"Уже отмечено: {stats.skipped_marked}. Невалидно: {stats.skipped_invalid}."
+        )
         if dry_run:
             return stats
 
@@ -170,17 +207,23 @@ class DeliveryEngine:
                 continue
             try:
                 if lead.amo_url:
-                    self.sheets.write_result(sheet, lead.sheet_row, lead.amo_url)
+                    self._log(
+                        f"ID {lead.source_id} уже есть в локальной базе: {lead.amo_url}. "
+                        "Новую сделку не создаём, записываем эту ссылку в таблицу."
+                    )
+                    self.sheets.write_result(sheet, lead.sheet_row, result_cell(lead.amo_url, "bd"))
                     self.storage.mark_completed(lead.source_id)
                     stats.completed += 1
                     continue
                 self.storage.mark_attempt(lead.source_id)
                 created = self.amo.find(lead)
                 if created is None:
+                    self._log(f"ID {lead.source_id} в amoCRM не найден, создаём сделку.")
                     missing_in_amo.append(lead)
                     continue
+                self._log(f"ID {lead.source_id} найден в amoCRM, сделка {created.lead_id}. Новую не создаём.")
                 stats.recovered += 1
-                self._complete(sheet, lead, created, stats)
+                self._complete(sheet, lead, created, stats, source="ama")
             except Exception as error:
                 self._fail(lead, error, stats)
 
@@ -189,8 +232,14 @@ class DeliveryEngine:
         return stats
 
 
-def build_engine(config: Config, storage: Storage) -> DeliveryEngine:
+def build_engine(config: Config, storage: Storage, *, debug: bool = False) -> DeliveryEngine:
     from lead_hub.amo import AmoGateway
     from lead_hub.google_sheets import GoogleSheetsGateway
 
-    return DeliveryEngine(config, storage, GoogleSheetsGateway(config), AmoGateway(config))
+    return DeliveryEngine(
+        config,
+        storage,
+        GoogleSheetsGateway(config),
+        AmoGateway(config, debug=debug),
+        debug=debug,
+    )

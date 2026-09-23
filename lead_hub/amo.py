@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import random
 import threading
 import time
@@ -19,9 +20,10 @@ AMO_RETRYABLE_GET_STATUSES = {429, 502, 503, 504}
 
 
 class AmoGateway:
-    def __init__(self, config: Config, session: requests.Session | None = None):
+    def __init__(self, config: Config, session: requests.Session | None = None, *, debug: bool = False):
         self.config = config
         self.session = session or requests.Session()
+        self.debug = debug
         self._last_request_at: float | None = None
         self._rate_lock = threading.Lock()
 
@@ -69,10 +71,24 @@ class AmoGateway:
     def _backoff(attempt: int) -> float:
         return 2 ** attempt + random.uniform(0, 0.25)
 
+    def _debug(self, title: str, payload: object) -> None:
+        if not self.debug:
+            return
+        print(f"\n===== {title} =====")
+        if isinstance(payload, str):
+            print(payload)
+            return
+        print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+
     def _request(self, method: str, path: str, **kwargs: Any) -> Any:
         method = method.upper()
         for attempt in range(AMO_RETRY_MAX_ATTEMPTS):
             self._wait_for_rate_limit()
+            print(f"amoCRM {method} {path}...", flush=True)
+            self._debug(
+                f"AMO запрос {method} {path}",
+                {key: value for key, value in kwargs.items() if key != "headers"},
+            )
             try:
                 response = self.session.request(
                     method,
@@ -81,12 +97,15 @@ class AmoGateway:
                     timeout=30,
                     **kwargs,
                 )
-            except requests.RequestException:
+            except requests.RequestException as error:
+                self._debug(f"AMO ошибка сети {method} {path}", str(error))
                 if method != "GET" or attempt + 1 >= AMO_RETRY_MAX_ATTEMPTS:
                     raise
                 time.sleep(self._backoff(attempt))
                 continue
 
+            if self.debug:
+                self._debug(f"AMO ответ {response.status_code} {method} {path}", response.text)
             retryable = response.status_code == 429 or (
                 method == "GET" and response.status_code in AMO_RETRYABLE_GET_STATUSES
             )
@@ -100,6 +119,7 @@ class AmoGateway:
         raise RuntimeError("Исчерпаны попытки запроса к amoCRM")
 
     def find_all(self, lead: Lead) -> list[CreatedLead]:
+        self._debug("Ожидаемый комментарий", self.comment(lead))
         result = self._request("GET", "leads", params={"query": lead.source_id, "limit": 250})
         matches: list[CreatedLead] = []
         for item in (result.get("_embedded", {}).get("leads", []) if isinstance(result, dict) else []):

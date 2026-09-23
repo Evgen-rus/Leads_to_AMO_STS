@@ -89,6 +89,7 @@ def main() -> int:
                     storage.record_error(lead.source_id, str(error))
             if index % 25 == 0:
                 print(f"Проверено {index}/{len(leads)}", flush=True)
+        sheets.flush()
 
     report = ROOT / "data" / "amo_duplicate_audit.csv"
     if duplicate_rows:

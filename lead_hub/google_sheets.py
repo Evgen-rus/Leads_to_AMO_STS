@@ -12,6 +12,7 @@ from lead_hub.models import SheetData
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 RESULT_COLUMN_FALLBACK_INDEX = 10  # K
+SHEETS_WRITE_BATCH = 500
 
 
 def normalize_header(value: str) -> str:
@@ -50,19 +51,23 @@ class GoogleSheetsGateway:
         self.config = config
         self._provided_service = service
         self._cached_service: Any | None = None
+        self._pending: list[tuple[str, str, str]] = []
 
     def _service(self) -> Any:
         if self._provided_service is not None:
             return self._provided_service
         if self._cached_service is None:
+            print("Подключаюсь к Google Sheets...", flush=True)
             credentials = service_account.Credentials.from_service_account_file(
                 self.config.credentials_file, scopes=SCOPES
             )
             self._cached_service = build("sheets", "v4", credentials=credentials, cache_discovery=False)
+            print("Подключение к Google Sheets готово.", flush=True)
         return self._cached_service
 
     def read(self, *, create_result_column: bool) -> SheetData:
         service = self._service()
+        print(f"Читаю лист {self.config.sheet_name!r} одним запросом...", flush=True)
         result = service.spreadsheets().values().get(
             spreadsheetId=self.config.spreadsheet_id,
             range=quote_sheet_name(self.config.sheet_name),
@@ -71,13 +76,24 @@ class GoogleSheetsGateway:
         headers = [str(value) for value in (values[0] if values else [])]
         rows = [[str(value) for value in row] for row in values[1:]] if values else []
         result_index = find_result_column(headers, self.config.result_header)
+        print(f"Лист прочитан, строк данных: {len(rows)}.", flush=True)
         return SheetData(self.config.spreadsheet_id, self.config.sheet_name, headers, rows, result_index)
 
     def write_result(self, sheet: SheetData, row_number: int, value: str) -> None:
         cell = f"{column_to_a1(sheet.result_column_index)}{row_number}"
-        self._service().spreadsheets().values().update(
-            spreadsheetId=sheet.spreadsheet_id,
-            range=f"{quote_sheet_name(sheet.sheet_name)}!{cell}",
-            valueInputOption="RAW",
-            body={"values": [[value]]},
-        ).execute()
+        target = f"{quote_sheet_name(sheet.sheet_name)}!{cell}"
+        self._pending.append((sheet.spreadsheet_id, target, value))
+
+    def flush(self) -> None:
+        while self._pending:
+            chunk = self._pending[:SHEETS_WRITE_BATCH]
+            print(f"Записываю {len(chunk)} ячеек в Google одним запросом...", flush=True)
+            self._service().spreadsheets().values().batchUpdate(
+                spreadsheetId=chunk[0][0],
+                body={
+                    "valueInputOption": "RAW",
+                    "data": [{"range": target, "values": [[value]]} for _, target, value in chunk],
+                },
+            ).execute()
+            del self._pending[: len(chunk)]
+            print(f"Записано ячеек: {len(chunk)}.", flush=True)
