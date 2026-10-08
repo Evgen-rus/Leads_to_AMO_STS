@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f4f6f8">
+  <title>amoCRM · просмотр сделок</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">ЛОКАЛЬНЫЙ ИССЛЕДОВАТЕЛЬ</p>
+        <h1>Сделки amoCRM</h1>
+        <p class="subtitle">Воронки, история обработки и материалы звонков</p>
+      </div>
+      <div class="status" id="app-status" role="status" aria-live="polite"><span class="status-dot"></span><span>Подключение…</span></div>
+    </header>
+
+    <section class="panel filters" aria-labelledby="filters-title">
+      <div class="section-heading">
+        <div><h2 id="filters-title">Найти сделки</h2><p>Период считается по дате создания, время CRM — Новосибирск (UTC+7)</p></div>
+        <button class="button secondary" id="reset-filters" type="button">Сбросить</button>
+      </div>
+      <div class="filter-grid">
+        <label class="field pipeline-field">Воронка
+          <select id="pipeline-select" disabled><option>Загружаю…</option></select>
+        </label>
+        <label class="field">Создана с
+          <input id="date-from" type="date">
+        </label>
+        <label class="field">по
+          <input id="date-to" type="date">
+        </label>
+        <label class="field search-field">Поиск по ID, имени или телефону
+          <input id="query" type="search" placeholder="Например, 52518163 или Дмитрий" autocomplete="off">
+        </label>
+        <label class="checkline ours-field" title="Наши сделки определяются по исходному ID и каналу, которые сохраняет этот проект"><input id="ours-only" type="checkbox"><span>Только наши сделки</span></label>
+      </div>
+      <details class="stage-picker" open>
+        <summary>Этапы <span id="stage-summary">Все этапы</span></summary>
+        <div id="stage-options" class="stage-options"><span class="muted">Выберите воронку</span></div>
+      </details>
+      <div class="filter-actions">
+        <button class="button" id="apply-filters" type="button">Показать сделки</button>
+        <span id="filter-message" class="muted" aria-live="polite"></span>
+      </div>
+    </section>
+
+    <section class="workspace" aria-label="Список и карточка сделки">
+      <section class="panel list-panel" aria-labelledby="list-title">
+        <div class="section-heading list-heading">
+          <div><h2 id="list-title">Сделки</h2><p id="list-caption">Загрузка…</p></div>
+          <button class="button secondary" id="refresh" type="button" aria-label="Обновить список">Обновить</button>
+        </div>
+        <div class="selection-bar">
+          <span><strong id="selected-count">0</strong> из 10 отмечено для выгрузки</span>
+          <span class="selection-actions"><button class="text-button" id="select-page" type="button">Добавить страницу</button><button class="text-button" id="clear-selection" type="button">Очистить</button></span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th class="select-col"><span class="sr-only">Выгрузка</span></th><th>Сделка</th><th>Этап</th><th>Создана</th></tr></thead>
+            <tbody id="deal-rows"><tr><td colspan="4" class="empty">Загружаю список…</td></tr></tbody>
+          </table>
+        </div>
+        <div class="pagination">
+          <button class="button secondary" id="prev-page" type="button" disabled>← Назад</button>
+          <span id="page-label">Страница 1</span>
+          <button class="button secondary" id="next-page" type="button" disabled>Дальше →</button>
+        </div>
+      </section>
+
+      <aside class="panel detail-panel" aria-labelledby="detail-title">
+        <div class="section-heading detail-heading">
+          <div><p class="eyebrow">КАРТОЧКА</p><h2 id="detail-title">Выберите сделку</h2></div>
+          <div class="detail-actions"><button class="button secondary" id="add-detail" type="button" hidden>В пакет</button><button class="button secondary" id="open-crm" type="button" hidden>Открыть в amoCRM ↗</button></div>
+        </div>
+        <form id="direct-form" class="direct-form">
+          <label class="field">Открыть по ссылке или ID
+            <span class="inline-input"><input id="direct-id" type="text" placeholder="ID или https://450458.amocrm.ru/leads/detail/…"><button class="button secondary" type="submit">Открыть</button></span>
+          </label>
+        </form>
+        <div id="detail-content" class="detail-content"><div class="empty detail-empty">Выберите сделку в списке или вставьте ссылку amoCRM.</div></div>
+      </aside>
+    </section>
+
+    <section class="panel export-panel" aria-labelledby="export-title">
+      <div class="section-heading export-heading">
+        <div><h2 id="export-title">Выгрузка выбранных сделок</h2><p>Пакет до 10 сделок. Архив разложен по воронкам и папкам сделок.</p></div>
+        <button class="button" id="export-button" type="button" disabled>Собрать архив</button>
+      </div>
+      <div class="material-options" aria-label="Что включить в архив">
+        <label><input type="checkbox" name="material" value="data" checked> Данные сделки</label>
+        <label><input type="checkbox" name="material" value="history" checked> История этапов</label>
+        <label><input type="checkbox" name="material" value="comments" checked> Комментарии</label>
+        <label><input type="checkbox" name="material" value="transcription" checked> Транскрибация</label>
+        <label><input type="checkbox" name="material" value="audio"> Аудиозаписи</label>
+      </div>
+      <div id="export-result" class="export-result" role="status" aria-live="polite"></div>
+    </section>
+    <footer>Работает локально · только чтение amoCRM · выгрузка до 10 сделок за раз</footer>
+  </main>
+</body>
+</html>
